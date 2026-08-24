@@ -1,11 +1,20 @@
 import { createHash } from "node:crypto";
+import type { BigIntStats } from "node:fs";
 import { constants as fsConstants } from "node:fs";
-import { mkdir, open, rename, rm, stat, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PaymentPayload } from "@x402/core/types";
 import { stableJson } from "./canonical-json.js";
 import { VrsaiJournalError } from "./errors.js";
+
+/** `fs.constants.O_NOFOLLOW` is POSIX-specific: Node/libuv does not honor it
+ * on Windows (a symlink at the target path is silently followed rather than
+ * rejected). Feature-detect it rather than assume it is always defined, and
+ * fall back to `0` (no-op flag) where it is not — the portable defense
+ * against symlinks is the explicit `lstat`-based checks below, not this
+ * flag. Kept as POSIX defense-in-depth per the journal's design invariants. */
+const NOFOLLOW_FLAG = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
 
 /** Default on-disk location for the crash-safe payment journal. Overridable
  * via {@link createFileJournal}'s `directory` argument (e.g. for tests or
@@ -130,6 +139,56 @@ function isJournalEntry(value: unknown): value is JournalEntry {
 }
 
 /**
+ * Proves, using the strongest portable file-identity fields Node exposes
+ * (`dev`+`ino`), that `postOpenLstat` — an `lstat` of a journal entry path
+ * taken immediately *after* opening it — still refers to the exact file
+ * behind the already-open handle described by `openedHandleStat` (an
+ * `fstat` of that handle). This is what closes the TOCTOU window a naive
+ * `lstat()` → `readFile(path)` sequence would leave open: `lstat` and
+ * `open`/`read` never inspect the same object unless this check also
+ * passes.
+ *
+ * `dev`+`ino` are POSIX inode-identity fields; Node populates equivalent
+ * (volume-serial + file-index) values on Windows/NTFS, but that mapping is
+ * not guaranteed universal across every platform or filesystem. Rather
+ * than pretend it always is, this fails closed — refusing to trust the
+ * entry — whenever either value looks degenerate (`0n`) instead of
+ * silently skipping the proof.
+ *
+ * Exported only for this module's own tests (deterministic, without
+ * needing to win a real filesystem race) — never part of the package's
+ * public API surface (not re-exported from `index.ts`).
+ */
+export function assertStableFileIdentity(
+  openedHandleStat: BigIntStats,
+  postOpenLstat: BigIntStats,
+): void {
+  if (postOpenLstat.isSymbolicLink() || !postOpenLstat.isFile()) {
+    throw new VrsaiJournalError(
+      "Payment journal entry path no longer refers to a regular file immediately after " +
+        "opening it. Refusing to trust it.",
+    );
+  }
+  if (
+    openedHandleStat.dev === 0n ||
+    openedHandleStat.ino === 0n ||
+    postOpenLstat.dev === 0n ||
+    postOpenLstat.ino === 0n
+  ) {
+    throw new VrsaiJournalError(
+      "This platform or filesystem does not expose stable file-identity fields for the " +
+        "payment journal entry. Refusing to trust it.",
+    );
+  }
+  if (openedHandleStat.dev !== postOpenLstat.dev || openedHandleStat.ino !== postOpenLstat.ino) {
+    throw new VrsaiJournalError(
+      "Payment journal entry path was replaced between opening it and verifying it " +
+        "(possible symlink or file-replacement attack). Refusing to trust it.",
+    );
+  }
+}
+
+/**
  * File-based journal storing at most one entry per fingerprint. Every write
  * — the initial claim and every subsequent update — goes through an
  * OS-atomic primitive so a crash or a racing process can never observe a
@@ -142,9 +201,16 @@ function isJournalEntry(value: unknown): value is JournalEntry {
  *   (also created with `O_CREAT|O_EXCL`) and durably `rename()`s it over
  *   the target, which POSIX guarantees is atomic — readers only ever see
  *   the old complete content or the new complete content, never a mix.
- * - Every read opens with `O_NOFOLLOW`, so a symlink placed at (or swapped
- *   into) the expected path is refused rather than silently followed to an
- *   attacker-chosen location.
+ * - Every read is guarded, portably, against symlinks and non-regular
+ *   files: the entry path is `lstat`ed *before* opening (rejecting a
+ *   symlink or non-regular dirent outright), opened with `O_NOFOLLOW` as
+ *   POSIX defense-in-depth (a no-op flag on Windows, where it is not
+ *   honored), then — after opening — the already-open handle is `fstat`ed
+ *   and the path is `lstat`ed *again* and compared for stable file
+ *   identity (`dev`+`ino`) against the opened handle. This proves the path
+ *   still refers to the exact file that was opened without ever trusting a
+ *   bare `lstat()` → `readFile(path)` sequence, which would leave an
+ *   unguarded TOCTOU window between the check and the read.
  * - Reads are bounded to {@link MAX_ENTRY_BYTES}, using `fstat` on the
  *   already-open file descriptor (no separate `stat`-then-`read` race).
  * - Every write calls `fsync` on the file (and, best-effort, on the
@@ -193,13 +259,42 @@ export function createFileJournal(directory: string = defaultJournalDirectory())
     }
   }
 
+  /** Rejects `stats` (from either `lstat` or an already-open handle's
+   * `fstat`) unless it describes a plain regular file — never a symlink,
+   * directory, FIFO, device, or anything else. Used both before opening an
+   * entry path (via `lstat`) and after opening it (via `fstat` on the
+   * handle), so a symlink or non-regular dirent is refused at every point
+   * this function is called. */
+  function assertRegularNonSymlink(stats: BigIntStats, when: string): void {
+    if (stats.isSymbolicLink()) {
+      throw new VrsaiJournalError(
+        `Payment journal entry path is a symlink, which is never trusted. Refusing to read it (${when}).`,
+      );
+    }
+    if (!stats.isFile()) {
+      throw new VrsaiJournalError(
+        `Payment journal entry path is not a regular file. Refusing to read it (${when}).`,
+      );
+    }
+  }
+
   async function readEntryFile(
     path: string,
     expectedFingerprint: string,
   ): Promise<JournalEntry | undefined> {
+    let preOpenLstat: BigIntStats;
+    try {
+      preOpenLstat = await lstat(path, { bigint: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return undefined;
+      throw new VrsaiJournalError(`Failed to read payment journal entry: ${String(error)}`);
+    }
+    assertRegularNonSymlink(preOpenLstat, "before opening it");
+
     let handle: Awaited<ReturnType<typeof open>>;
     try {
-      handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      handle = await open(path, fsConstants.O_RDONLY | NOFOLLOW_FLAG);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return undefined;
@@ -211,16 +306,26 @@ export function createFileJournal(directory: string = defaultJournalDirectory())
       throw new VrsaiJournalError(`Failed to read payment journal entry: ${String(error)}`);
     }
     try {
-      const stat = await handle.stat();
-      if (!stat.isFile()) {
-        throw new VrsaiJournalError("Payment journal entry path is not a regular file.");
+      const handleStat = await handle.stat({ bigint: true });
+      assertRegularNonSymlink(handleStat, "after opening it");
+
+      let postOpenLstat: BigIntStats;
+      try {
+        postOpenLstat = await lstat(path, { bigint: true });
+      } catch (error) {
+        throw new VrsaiJournalError(
+          "Payment journal entry path disappeared or became unreadable immediately after " +
+            `opening it: ${String(error)}`,
+        );
       }
-      if (stat.size > MAX_ENTRY_BYTES) {
+      assertStableFileIdentity(handleStat, postOpenLstat);
+
+      if (handleStat.size > BigInt(MAX_ENTRY_BYTES)) {
         throw new VrsaiJournalError(
           `Payment journal entry exceeds the safe read bound of ${MAX_ENTRY_BYTES} bytes.`,
         );
       }
-      const buffer = Buffer.alloc(stat.size);
+      const buffer = Buffer.alloc(Number(handleStat.size));
       let offset = 0;
       while (offset < buffer.length) {
         const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);

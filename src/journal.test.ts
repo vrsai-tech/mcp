@@ -1,4 +1,5 @@
-import { chmod, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PaymentPayload } from "@x402/core/types";
@@ -6,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VrsaiJournalError } from "./errors.js";
 import {
   _clearJournalDirectory,
+  assertStableFileIdentity,
   computeRequestFingerprint,
   createFileJournal,
   createInMemoryJournal,
@@ -179,6 +181,12 @@ describe("createFileJournal", () => {
     await expect(journal.load("fp-symlink")).rejects.toThrow(VrsaiJournalError);
   });
 
+  it("refuses to read a non-regular entry (a directory) placed at the expected entry path", async () => {
+    const journal = createFileJournal(directory);
+    await mkdir(join(directory, "fp-nonregular.json"));
+    await expect(journal.load("fp-nonregular")).rejects.toThrow(VrsaiJournalError);
+  });
+
   it("simulates a crash mid-write: a leftover temp file must not be read as a valid entry", async () => {
     const journal = createFileJournal(directory);
     await journal.claim("fp-crash", CONTEXT);
@@ -199,4 +207,63 @@ describe("createFileJournal", () => {
       await expect(journal.claim("fp-insecure", CONTEXT)).rejects.toThrow(VrsaiJournalError);
     },
   );
+});
+
+/**
+ * Deterministic, race-free unit tests for the portable post-open identity
+ * proof that replaces the non-portable `O_NOFOLLOW`-only guarantee on
+ * platforms (Windows) where that flag is not honored. Constructing the
+ * `BigIntStats`-shaped inputs directly lets these assert the exact
+ * accept/reject boundary without needing to win a real filesystem race.
+ */
+describe("assertStableFileIdentity", () => {
+  function fakeStat(fields: {
+    readonly dev: bigint;
+    readonly ino: bigint;
+    readonly isFile: boolean;
+    readonly isSymbolicLink: boolean;
+  }): BigIntStats {
+    return {
+      dev: fields.dev,
+      ino: fields.ino,
+      isFile: () => fields.isFile,
+      isSymbolicLink: () => fields.isSymbolicLink,
+    } as BigIntStats;
+  }
+
+  it("accepts identical dev+ino between the opened handle and the post-open lstat", () => {
+    const handleStat = fakeStat({ dev: 5n, ino: 1234n, isFile: true, isSymbolicLink: false });
+    const postOpenLstat = fakeStat({ dev: 5n, ino: 1234n, isFile: true, isSymbolicLink: false });
+    expect(() => assertStableFileIdentity(handleStat, postOpenLstat)).not.toThrow();
+  });
+
+  it("rejects a post-open lstat whose ino differs from the opened handle (replacement)", () => {
+    const handleStat = fakeStat({ dev: 5n, ino: 1234n, isFile: true, isSymbolicLink: false });
+    const postOpenLstat = fakeStat({ dev: 5n, ino: 9999n, isFile: true, isSymbolicLink: false });
+    expect(() => assertStableFileIdentity(handleStat, postOpenLstat)).toThrow(VrsaiJournalError);
+  });
+
+  it("rejects a post-open lstat whose dev differs from the opened handle (replacement)", () => {
+    const handleStat = fakeStat({ dev: 5n, ino: 1234n, isFile: true, isSymbolicLink: false });
+    const postOpenLstat = fakeStat({ dev: 6n, ino: 1234n, isFile: true, isSymbolicLink: false });
+    expect(() => assertStableFileIdentity(handleStat, postOpenLstat)).toThrow(VrsaiJournalError);
+  });
+
+  it("rejects a post-open lstat that has become a symlink", () => {
+    const handleStat = fakeStat({ dev: 5n, ino: 1234n, isFile: true, isSymbolicLink: false });
+    const postOpenLstat = fakeStat({ dev: 5n, ino: 1234n, isFile: false, isSymbolicLink: true });
+    expect(() => assertStableFileIdentity(handleStat, postOpenLstat)).toThrow(VrsaiJournalError);
+  });
+
+  it("rejects a post-open lstat that has become a non-regular file", () => {
+    const handleStat = fakeStat({ dev: 5n, ino: 1234n, isFile: true, isSymbolicLink: false });
+    const postOpenLstat = fakeStat({ dev: 5n, ino: 1234n, isFile: false, isSymbolicLink: false });
+    expect(() => assertStableFileIdentity(handleStat, postOpenLstat)).toThrow(VrsaiJournalError);
+  });
+
+  it("fails closed when identity fields are degenerate (0n) instead of silently skipping the proof", () => {
+    const handleStat = fakeStat({ dev: 0n, ino: 0n, isFile: true, isSymbolicLink: false });
+    const postOpenLstat = fakeStat({ dev: 0n, ino: 0n, isFile: true, isSymbolicLink: false });
+    expect(() => assertStableFileIdentity(handleStat, postOpenLstat)).toThrow(VrsaiJournalError);
+  });
 });

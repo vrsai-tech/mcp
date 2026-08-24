@@ -1,5 +1,10 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/vrsai-tech/mcp/main/assets/mark.svg" alt="vrsai mark" width="56" height="56">
+  <img
+    src="https://api.vrsai.tech/brand/mark-512.png"
+    width="56"
+    height="56"
+    alt="vrsai mark"
+  />
 </p>
 
 # @vrsai/mcp
