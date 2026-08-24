@@ -16,6 +16,7 @@
  *   that get staged and published.
  */
 import { execFileSync } from "node:child_process";
+import { execNpmSync } from "./npm-exec.ts";
 
 interface PackedFile {
   readonly path: string;
@@ -61,9 +62,7 @@ export function checkPackedFiles(paths: readonly string[]): readonly string[] {
 }
 
 function runNpmPackDryRun(): PackResult {
-  const raw = execFileSync("npm", ["pack", "--dry-run", "--json"], {
-    encoding: "utf8",
-  });
+  const raw = execNpmSync(["pack", "--dry-run", "--json"]);
   const jsonStart = raw.indexOf("[");
   if (jsonStart === -1) {
     throw new Error(`npm pack --dry-run --json produced no JSON output:\n${raw}`);

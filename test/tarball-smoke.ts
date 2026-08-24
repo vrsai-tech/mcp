@@ -38,13 +38,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { execNpmSync } from "./npm-exec.ts";
 
 const REPO_ROOT = process.cwd();
 
 function packTarball(destDir: string): string {
-  const raw = execFileSync("npm", ["pack", "--silent", "--pack-destination", destDir], {
+  const raw = execNpmSync(["pack", "--silent", "--pack-destination", destDir], {
     cwd: REPO_ROOT,
-    encoding: "utf8",
   }).trim();
   const fileName = raw.split("\n").at(-1);
   if (!fileName) throw new Error("npm pack produced no output filename.");
@@ -56,9 +56,8 @@ function installIntoConsumer(consumerDir: string, tarballPath: string): void {
     join(consumerDir, "package.json"),
     JSON.stringify({ name: "vrsai-mcp-tarball-smoke", version: "0.0.0", private: true }, null, 2),
   );
-  execFileSync("npm", ["install", "--silent", "--no-audit", "--no-fund", tarballPath], {
+  execNpmSync(["install", "--silent", "--no-audit", "--no-fund", tarballPath], {
     cwd: consumerDir,
-    stdio: "pipe",
   });
 }
 
