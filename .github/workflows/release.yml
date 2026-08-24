@@ -1,0 +1,243 @@
+name: release
+
+# Triggered only by pushing a SemVer release tag (vX.Y.Z or
+# vX.Y.Z-{beta,rc}.N). Never triggered by `push` to main, pull requests,
+# `pull_request_target`, `workflow_run`, or a published GitHub Release.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# Do not cancel an in-flight release run if the same tag is re-pushed; let it
+# finish (or fail) rather than tearing down a partially-staged attempt.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Exact toolchain pins. PNPM_VERSION must always match package.json's
+# `packageManager` field. NPM_CLI_VERSION is the npm CLI used for `npm pack`,
+# registry lookups, and `npm stage publish` — it is unrelated to pnpm and is
+# never used to install project dependencies.
+env:
+  PNPM_VERSION: "11.23.0"
+  # npm stage publish requires npm >= 11.15.0 and Node >= 22.14.0. Pinned to
+  # the latest stable release on the mature 11.x line (not the newer 12.x
+  # major) for a conservative, reviewed staging toolchain.
+  # https://github.com/npm/cli/releases/tag/v11.19.0
+  NPM_CLI_VERSION: "11.19.0"
+
+jobs:
+  # Unprivileged. Reads source, validates release identity, builds the
+  # exact candidate tarball once, and fully qualifies it. Has no npm
+  # publishing capability of any kind.
+  verify:
+    name: verify release candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      dist-tag: ${{ steps.resolve-dist-tag.outputs.dist-tag }}
+    steps:
+      - name: Validate tag is an allowed SemVer release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+            echo "Tag '$TAG' is not an allowed SemVer release tag (vX.Y.Z or vX.Y.Z-{beta,rc}.N)." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "Release tag: $TAG (version $VERSION)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # actions/checkout v7.0.1 (https://github.com/actions/checkout/releases/tag/v7.0.1)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Confirm tagged commit is reachable from origin/main
+        run: |
+          set -euo pipefail
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Tagged commit $GITHUB_SHA is not reachable from origin/main." >&2
+            exit 1
+          fi
+
+      # actions/setup-node v7.0.0 (https://github.com/actions/setup-node/releases/tag/v7.0.0)
+      # Runs before any step that uses `node` to inspect package.json, and
+      # before any npm registry/package operation in this job.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+
+      - name: Confirm tag version matches package.json version
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$PKG_VERSION" != "${{ steps.tag.outputs.version }}" ]; then
+            echo "Tag version (${{ steps.tag.outputs.version }}) does not match package.json version ($PKG_VERSION)." >&2
+            exit 1
+          fi
+
+      # Pinned before ANY npm registry/package operation in this job
+      # (including `npm view` and `npm pack` below), so every such
+      # operation runs on the one reviewed npm CLI version rather than
+      # whatever npm happens to ship with the runner's default Node.
+      - name: Install the pinned, reviewed npm CLI
+        run: npm install --global "npm@${{ env.NPM_CLI_VERSION }}"
+
+      - name: Install the pinned pnpm version
+        run: npm install --global "pnpm@${{ env.PNPM_VERSION }}"
+
+      - name: Assert the reviewed toolchain versions are actually in effect
+        run: |
+          set -euo pipefail
+          echo "node: $(node --version)"
+          echo "npm:  $(npm --version)"
+          echo "pnpm: $(pnpm --version)"
+          ACTUAL_NPM="$(npm --version)"
+          if [ "$ACTUAL_NPM" != "${{ env.NPM_CLI_VERSION }}" ]; then
+            echo "npm CLI version ($ACTUAL_NPM) does not match the pinned, reviewed version (${{ env.NPM_CLI_VERSION }})." >&2
+            exit 1
+          fi
+          ACTUAL_PNPM="$(pnpm --version)"
+          if [ "$ACTUAL_PNPM" != "${{ env.PNPM_VERSION }}" ]; then
+            echo "pnpm version ($ACTUAL_PNPM) does not match the pinned version (${{ env.PNPM_VERSION }})." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the canonical gate
+        run: pnpm run check
+
+      - name: Fail closed unless this version is confirmed unpublished
+        run: |
+          set -euo pipefail
+          PKG="@vrsai/mcp@${{ steps.tag.outputs.version }}"
+          if npm view "$PKG" version >/tmp/npm-view.out 2>/tmp/npm-view.err; then
+            echo "$PKG is already published on npm. Refusing to proceed." >&2
+            exit 1
+          fi
+          # `npm view` exits non-zero both when the version genuinely does
+          # not exist (E404, the expected/desired case here) and when the
+          # registry is unreachable. Distinguish them so a transient
+          # registry outage fails closed instead of silently proceeding.
+          if grep -qi "E404" /tmp/npm-view.err; then
+            echo "Confirmed $PKG is not yet published."
+          else
+            echo "Could not confirm npm registry availability/version state; failing closed." >&2
+            cat /tmp/npm-view.err >&2
+            exit 1
+          fi
+
+      - name: Build the exact release tarball once
+        run: |
+          set -euo pipefail
+          mkdir -p .release
+          npm pack --silent --pack-destination .release
+          ls -1 .release
+
+      # Every check below runs directly against the exact candidate tarball
+      # built above -- none of them invoke `npm pack` or otherwise repack the
+      # working directory, so the bytes qualified here are the exact same
+      # bytes hashed, uploaded, staged, and (for the bootstrap release)
+      # published.
+      - name: Qualify the exact candidate tarball (allowlist, install smoke, CLI handshake, publint, ATTW)
+        run: |
+          set -euo pipefail
+          TARBALL_PATH=".release/$(cd .release && ls -1 *.tgz)"
+          echo "Qualifying exact release candidate: $TARBALL_PATH"
+          node --experimental-strip-types test/pack-inspect.ts "$TARBALL_PATH"
+          node --experimental-strip-types test/tarball-smoke.ts "$TARBALL_PATH"
+          pnpm exec publint "$TARBALL_PATH"
+          pnpm exec attw "$TARBALL_PATH" --profile esm-only
+
+      - name: Compute SHA-256 checksum of the exact tarball
+        run: |
+          set -euo pipefail
+          cd .release
+          TARBALL="$(ls -1 *.tgz)"
+          sha256sum "$TARBALL" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Resolve the npm dist-tag for this version
+        id: resolve-dist-tag
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.tag.outputs.version }}"
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            DIST_TAG="latest"
+          elif [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-(beta|rc)\.[0-9]+$ ]]; then
+            DIST_TAG="next"
+          else
+            echo "Unsupported prerelease identifier in version '$VERSION'; refusing to guess a dist-tag." >&2
+            exit 1
+          fi
+          echo "Resolved npm dist-tag: $DIST_TAG"
+          echo "dist-tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+
+      # actions/upload-artifact v7.0.1 (https://github.com/actions/upload-artifact/releases/tag/v7.0.1)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: npm-release-candidate
+          path: |
+            .release/*.tgz
+            .release/SHA256SUMS
+          retention-days: 14
+          if-no-files-found: error
+
+  # Privileged only after human-controlled activation. Never rebuilds the
+  # package: downloads the exact artifact `verify` produced, checks its
+  # hash, and stages it to npm. Cannot run `npm publish` or approve a stage.
+  stage:
+    name: stage to npm (OIDC)
+    needs: verify
+    if: ${{ vars.NPM_TRUSTED_PUBLISHING_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # No repository checkout: this job's only authority/data is the Node
+      # runtime, the exact downloaded .tgz + SHA256SUMS artifact from
+      # `verify`, and its OIDC identity. It never reads repository source.
+
+      # actions/setup-node v7.0.0 (https://github.com/actions/setup-node/releases/tag/v7.0.0)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+
+      # actions/download-artifact v8.0.1 (https://github.com/actions/download-artifact/releases/tag/v8.0.1)
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: npm-release-candidate
+          path: .release
+
+      - name: Verify the downloaded tarball's checksum before touching npm
+        run: |
+          set -euo pipefail
+          cd .release
+          sha256sum -c SHA256SUMS
+
+      - name: Install the pinned, reviewed npm CLI for staged publishing
+        run: npm install --global "npm@${{ env.NPM_CLI_VERSION }}"
+
+      - name: Stage the exact verified tarball to npm (staging only, no publish, no approve)
+        run: |
+          set -euo pipefail
+          cd .release
+          TARBALL="$(ls -1 *.tgz)"
+          DIST_TAG="${{ needs.verify.outputs.dist-tag }}"
+          echo "Staging $TARBALL to npm with dist-tag '$DIST_TAG'."
+          npm stage publish "./$TARBALL" --tag "$DIST_TAG"

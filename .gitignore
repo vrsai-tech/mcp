@@ -1,0 +1,24 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.release/
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
+__MACOSX/
+
+*.log
+.tmp/
+tmp/
+
+.vscode/
+.idea/
+
+# Local crash-safe payment journal (default location under the user's home
+# directory is outside this repo; this covers the unlikely case of a
+# directory-scoped journal pointed at a repo-local path during development).
+.vrsai/

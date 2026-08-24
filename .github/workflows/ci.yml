@@ -1,0 +1,102 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Must match package.json's `packageManager` field exactly. Bundled Corepack
+# is no longer distributed starting with Node 25, so pnpm is installed
+# explicitly and deterministically via `npm install --global` instead of
+# relying on `corepack enable` (which cannot be assumed present on every
+# supported/forward-compat Node version below).
+env:
+  PNPM_VERSION: "11.23.0"
+
+jobs:
+  check:
+    name: check (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: "22"
+          - os: ubuntu-latest
+            node: "24"
+          - os: macos-latest
+            node: "24"
+          - os: windows-latest
+            node: "24"
+    steps:
+      # actions/checkout v7.0.1 (https://github.com/actions/checkout/releases/tag/v7.0.1)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # actions/setup-node v7.0.0 (https://github.com/actions/setup-node/releases/tag/v7.0.0)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install the pinned pnpm version
+        run: npm install --global "pnpm@${{ env.PNPM_VERSION }}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the canonical gate
+        run: pnpm run check
+
+  # Non-blocking forward-compatibility signal while Node 26 is Current
+  # (not yet LTS). Intentionally excluded from the required `ci` status
+  # check below so it can fail without blocking merges. Node 26 no longer
+  # bundles Corepack, so this lane must not depend on it either.
+  forward-compat:
+    name: forward-compat (ubuntu, node 26)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "26"
+
+      - name: Install the pinned pnpm version
+        run: npm install --global "pnpm@${{ env.PNPM_VERSION }}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the canonical gate
+        run: pnpm run check
+
+  # Single required aggregate status check. Branch protection should require
+  # only this job ("ci"), not each individual matrix leg.
+  ci:
+    name: ci
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    steps:
+      - name: Require all required matrix legs to have succeeded
+        run: |
+          if [ "${{ needs.check.result }}" != "success" ]; then
+            echo "One or more required 'check' matrix legs did not succeed." >&2
+            exit 1
+          fi

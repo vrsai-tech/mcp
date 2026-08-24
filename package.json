@@ -1,0 +1,87 @@
+{
+  "name": "@vrsai/mcp",
+  "version": "0.1.0",
+  "description": "Official TypeScript client and optional local stdio bridge for vrsai, with native MCP and x402 payments plus buyer-side safety controls.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-client",
+    "x402",
+    "typescript",
+    "typescript-sdk",
+    "sdk",
+    "ai-agents",
+    "autonomous-agents",
+    "machine-commerce",
+    "payments",
+    "stdio",
+    "vrsai"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://vrsai.tech",
+  "bugs": {
+    "url": "https://github.com/vrsai-tech/mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vrsai-tech/mcp.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.23.0+sha512.f00082e5b283a199b74e079da28d155c008fe232f44c8a06ea7ddfa014ecf719fc362f790ecc67b28106ddac2afb24c49a9a079159da560b2ce7d1e98efd11af",
+  "bin": {
+    "vrsai-mcp": "./dist/bin/vrsai-mcp.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "format": "biome format --write .",
+    "lint": "biome ci .",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check:boundary": "node --experimental-strip-types test/boundary-check.ts",
+    "pack:inspect": "node --experimental-strip-types test/pack-inspect.ts",
+    "test:tarball": "node --experimental-strip-types test/tarball-smoke.ts",
+    "check:package": "publint && attw --pack . --profile esm-only",
+    "verify:package": "pnpm run clean && pnpm run build && pnpm run pack:inspect && pnpm run test:tarball && pnpm run check:package",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run check:boundary && pnpm run verify:package",
+    "prepack": "pnpm run clean && pnpm run build",
+    "prepublishOnly": "pnpm run check"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@x402/core": "2.22.0",
+    "@x402/evm": "2.22.0",
+    "@x402/extensions": "2.22.0",
+    "viem": "2.48.11"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@biomejs/biome": "2.5.10",
+    "@types/node": "22.20.1",
+    "publint": "0.3.24",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}

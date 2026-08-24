@@ -1,0 +1,15 @@
+# CODEOWNERS
+#
+# Solo-maintainer repository: this file establishes clear ownership without
+# requiring CODEOWNERS-review approval (there is only one maintainer today).
+# When this project has more than one maintainer, replace @hugodscarvalho
+# below with a @vrsai-tech/mcp-maintainers team.
+
+*                       @hugodscarvalho
+
+/.github/               @hugodscarvalho
+/package.json           @hugodscarvalho
+/pnpm-lock.yaml         @hugodscarvalho
+/SECURITY.md            @hugodscarvalho
+/src/                   @hugodscarvalho
+/test/                  @hugodscarvalho
