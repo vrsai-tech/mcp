@@ -193,6 +193,7 @@ jobs:
           echo "dist-tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
 
       # actions/upload-artifact v7.0.1 (https://github.com/actions/upload-artifact/releases/tag/v7.0.1)
+      # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: npm-release-candidate
@@ -201,6 +202,7 @@ jobs:
             .release/SHA256SUMS
           retention-days: 14
           if-no-files-found: error
+          include-hidden-files: true
 
   # Privileged only after human-controlled activation. Never rebuilds the
   # package: downloads the exact artifact `verify` produced, checks its
