@@ -43,10 +43,8 @@ same way any other external MCP client would — see
 
 `0.1.0` is initial-development, pre-release software (see
 [Semantic Versioning 2.0.0](https://semver.org/#spec-item-4)): the public API
-may still change between `0.x` releases. This package has not yet been
-published to npm — the install command below will become live at first
-publication. See [`docs/releasing.md`](./docs/releasing.md) for the release
-plan.
+may still change between `0.x` releases. See [`docs/releasing.md`](./docs/releasing.md)
+for the release plan.
 
 ## Installation
 
