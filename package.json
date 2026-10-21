@@ -69,7 +69,7 @@
     "prepublishOnly": "pnpm run check"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/client": "2.3.0",
     "@modelcontextprotocol/server": "2.0.0",
     "@x402/core": "2.22.0",
     "@x402/evm": "2.22.0",
